@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+<!-- Launches all necessary nodes that let the car drive autonomously. -->
+  <node respawn="true" pkg="semantic_segmentation" type="seg_node.py" name="semantic_segmentation" output = "screen">
+  </node>
+</launch>

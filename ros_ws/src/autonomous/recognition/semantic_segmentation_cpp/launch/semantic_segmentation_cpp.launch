@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+<!-- Launches all necessary nodes that let the car drive autonomously. -->
+  <node respawn="true" pkg="semantic_segmentation_cpp" type="node" name="semantic_segmentation_seg_cpp" output = "screen">
+  </node>
+</launch>
