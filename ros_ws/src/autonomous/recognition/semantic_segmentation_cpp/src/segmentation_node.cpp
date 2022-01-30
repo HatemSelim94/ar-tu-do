@@ -1,75 +1,126 @@
+// -*- lsst-c++ -*-
 #include <semantic_segmentation_cpp/segmentation_node.hpp>
 
+/**
+ * @brief Timer class constructor.
+ * 
+ * @param[in] name String represents the name of the code to be timed
+ */
 Timer::Timer(std::string name):name(name){
     this->t_start = std::chrono::system_clock::now();
     this->t_stop = std::chrono::system_clock::now();
     this->t_average = 0;
     this->t_itertion = 0;
     this->t_total_time = 0;
+    this->idle= true;
 }
+
+/**
+ * @brief Timer class destructor.
+ *
+ * @details Timer class to time code execution
+ * 
+ * @param[in] name String represents the name of the code to be timed
+ */
 Timer::~Timer(){
     auto num = this->getAverage();
     std::cout<<this->name<<": "<<num/1000<<" ms"<<std::endl;
 }
 
+
+/**
+ * @class Timer
+ * 
+ * @brief A function to start the timer.
+ * 
+ */
 void Timer::start(){
+    if (this->idle){
     this->t_start = std::chrono::system_clock::now();
+    this->idle = false;
+    }
 }
 
+
+/**
+ * @class Timer
+ * 
+ * @brief A function to stop the timer.
+ * 
+ */
 void Timer::stop(){
+    if(!this->idle){
     this->t_stop = std::chrono::system_clock::now();
     this->t_total_time +=  duration_cast<microseconds>(this->t_stop - this->t_start).count(); 
     ++ this->t_itertion;
+    this->idle = true;
+    }
 }
 
+
+/**
+ * @class Timer
+ * 
+ * @brief A function to calculate the average time.
+ * 
+ */
 double Timer::getAverage(){
     this->t_average = this->t_total_time/this->t_itertion;
     return this->t_average; 
 }
-/*
-cv::Mat TensorCv::toCvImage(){
-    auto size = this->sizes();
-    uint16_t height = *(size.end()-2);
-    uint16_t width = *(size.end()-1); 
-    try
-    {
-        cv::Mat output_mat(cv::Size{ width, height}, CV_8UC3, this->data_ptr<uint8_t>());
-        return output_mat.clone();
-    }
-    catch (const c10::Error& e)
-    {
-        std::cout << "an error has occured : " << e.msg() << std::endl;
-    }
-    return cv::Mat(height, width, CV_8UC3);
-}*/
 
-Timer t_to_tensor("Average to_tensor conversion time"), t_processing_time("Average processing time"), t_output_time("Average output preparation time"), t_publishing("Average publishing time"), t_color_map("Average Color Map time");
 
+// pipeline timer declaration
+Timer t_pipeline("Average pipeline time"), t_tocv("Average from rosmsg to cvimage");
+
+
+/**
+ * @brief Segmenation node class constructor.
+ * 
+ * @param[in] img_h (uint) represents the height of the image.
+ * 
+ * @param[in] img_w (uint) represents the width of the image.
+ * 
+ * @param[in] classes (uint) represents the number of classes. 
+ */
 SegNode::SegNode(): img_h(376), img_w(672),classes(3)
 {
+    // Set the node handle pointer
     this->it.reset(new image_transport::ImageTransport(this->nh));
     this->loaded = false;
+    
+    // Set computation rate 
     float compute_rate = 30;
+
+    // Set publishing rate
     float publish_rate = 30;
+    
+    // Prepare timers inputs
     ros::Duration compute_duration = ros::Duration((1/compute_rate));
     ros::Duration publish_duration = ros::Duration((1/publish_rate));
     ros::Duration load_duration = ros::Duration((1/5));
+    
+    // Publishers
     this->pub =  this->nh.advertise<std_msgs::UInt8MultiArray>(SEG_OUTPUT_TOPIC, 1);
     this->rgb_pub = this->it->advertise(SEG_RGB_OUTOUT_TOPIC, 1);
+    
+    // Subscriber
     this->sub = this->it->subscribe(CAMERA_TOPIC, 1,&SegNode::cameraCallback, this);
+    
+    // Timers
     this->compute_t = this->nh.createTimer(compute_duration, &SegNode::compute,this);
     this->publish_t = this->nh.createTimer(publish_duration, &SegNode::publishMessage,this);
     this->load_t = this->nh.createTimer(load_duration, &SegNode::loadModel,this, true); // one-shot timer to load the model
      
-    //this->model.to(at::kCUDA);
+    // Set tensor options
     this->options = torch::TensorOptions().dtype(at::kByte).device(torch::kCPU).requires_grad(false);
 
-    // Create a vector of inputs.
+    // Set all pointers to nullptr.
     this->seg_output_ptr = nullptr; 
     this->input_cv_ptr = nullptr;
     this->output_rgb_ptr = nullptr;
     
-    //colors
+    //Initialize colors
     colors.resize(this->classes, std::vector<uint8_t>(3));
     colors[0] = std::vector<uint8_t>{0,0,255};
     colors[1] = std::vector<uint8_t>{0,255,0};
@@ -77,7 +128,7 @@ SegNode::SegNode(): img_h(376), img_w(672),classes(3)
     
 
 
-    // output layout
+    // Prepare output layout
     std::vector<std_msgs::MultiArrayDimension> dims;
     dims.resize(2);
     dims[0].label = "height";
@@ -89,17 +140,31 @@ SegNode::SegNode(): img_h(376), img_w(672),classes(3)
     this->layout.dim = dims;
 }
 
-// store the image in a member var
+/**
+ * Callback function associated with the camera subscriber to get a new message
+ *
+ * Callback function invoked when a new message is published on the camera output topic
+ * to get a new message.
+ * 
+ * @param[in] image_msg Pointer to the image message
+ */
 void SegNode::cameraCallback(const sensor_msgs::ImageConstPtr& image_msg){
-    //auto start = high_resolution_clock::now();
     if(this->loaded){
-    this->input_cv_ptr = cv_bridge::toCvCopy(image_msg, sensor_msgs::image_encodings::RGB8); //(copy not a share)
-    //auto conversion_stop = high_resolution_clock::now();
-    //auto duration = duration_cast<milliseconds>(conversion_stop - start);
-    //std::cout<<"Conversion to cv image rgb time: "<<duration.count()/1000<<"ms"<<std::endl;
+    t_tocv.start();
+    // copy the received image data(use opencv copy function not share)
+    this->input_cv_ptr = cv_bridge::toCvCopy(image_msg, sensor_msgs::image_encodings::RGB8); 
+    t_tocv.stop();
     }
 }
 
+/**
+ * Timer callback function to load the jit model
+ *
+ * Function to load the jit model. Instead of loading the model while initilizing the node, 
+ * the function is associated with a one-shot timer to load the model. 
+ * 
+ * @param[in] event Structure passed as a parameter to the callback invoked by a ros::Timer
+ */
 void SegNode::loadModel(const ros::TimerEvent& event){
     // load torch script
     this->model = torch::jit::load(MODEL_PATH, torch::kCUDA);
@@ -108,46 +173,55 @@ void SegNode::loadModel(const ros::TimerEvent& event){
 }
 
 
-// compute the output
+/**
+ * Class member function.
+ * 
+ * @class SegNode
+ * 
+ * @brief Computes the output and prepare output variables to be published
+ * 
+ * @param[in] event Structure passed as a parameter to the callback invoked by a ros::Timer
+ */
 void SegNode::compute(const ros::TimerEvent& event){
-    //auto start = high_resolution_clock::now();
     
     try{
-        if(this->input_cv_ptr !=nullptr && this->loaded)
-        {
-        t_to_tensor.start();
-        t_processing_time.start();
-        at::Tensor tensor_image = torch::from_blob((this->input_cv_ptr->image.data), { this->input_cv_ptr->image.rows, this->input_cv_ptr->image.cols, this->input_cv_ptr->image.channels() }, this->options).permute({2,0,1}).toType(at::kFloat).div_(255.).unsqueeze_(0).to(at::kCUDA);
-        //std::cout<<"tensor shape: "<<tensor_image.sizes()<<std::endl;
+        if(this->input_cv_ptr !=nullptr && this->loaded){
+        
+        t_pipeline.start();
+        
+        at::Tensor tensor_image = torch::from_blob((this->input_cv_ptr->image.data), 
+        { this->input_cv_ptr->image.rows, this->input_cv_ptr->image.cols, this->input_cv_ptr->image.channels() }, 
+        this->options).permute({2,0,1}).toType(at::kFloat).div_(255.).unsqueeze_(0).to(at::kCUDA);
+        
+        
         std::vector<torch::jit::IValue> jit_inputs;
         jit_inputs.push_back(tensor_image); // copy
-        //auto conversion_stop = high_resolution_clock::now();
-        //auto duration = duration_cast<microseconds>(conversion_stop - start);
-        t_to_tensor.stop();
+        
         at::Tensor output = this->model.forward(jit_inputs).toTensor().argmax(1).to(at::kCPU).to(torch::kUInt8);
-        //auto out = torch::_unique(output);
-        //std::cout<<"Unique Values: "<<std::get<0>(out)<<"HHHHH"<<std::get<1>(out)<<std::endl;
-        //at::Tensor output = this->model.forward(jit_inputs).toTensor();
-        t_processing_time.stop();
-        //at::Tensor output = this->model.forward(jit_inputs).toTensor();
-        t_output_time.start();
+        
         this->fillOutput(output);
-        t_output_time.stop(); 
-        //
+        torch::cuda::synchronize(); 
+        t_pipeline.stop();
         }
         
-
     }
     catch (cv_bridge::Exception& e){
          ROS_ERROR("cv_bridge exception: %s", e.what());
          return;
        }
-    //auto stop = high_resolution_clock::now();
-    //auto duration = duration_cast<microseconds>(stop - start);
-    //std::cout<<"Processing time: "<<duration.count()/1000<<"ms"<<std::endl;
+
 }
 
-// helper function to fill the output vars
+
+/**
+ * Class member function.
+ * 
+ * @class SegNode
+ * 
+ * @brief Helper function to fill the outputs
+ * 
+ * @param[in] event Structure passed as a parameter to the callback invoked by a ros::Timer
+ */
 void SegNode::fillOutput(at::Tensor& input){
     
     if (this->seg_output_ptr == nullptr);
@@ -156,29 +230,32 @@ void SegNode::fillOutput(at::Tensor& input){
         this->seg_output_ptr->layout = this->layout;
         //this->seg_output_ptr->data.reserve(input.numel());
     }
+
     // fill seg output (ids)
-    //std::vector<uchar> v(input.data_ptr<uchar>(), input.data_ptr<uchar>() + input.numel());
-    this->seg_output_ptr->data.clear(); //
+    this->seg_output_ptr->data.clear(); 
     this->seg_output_ptr->data.assign(input.data_ptr<uchar>(), input.data_ptr<uchar>()+input.numel());
     
     // fill seg output (rgb)
-    //this->input
-    // this->colorMap(); fill this->output_rgb_ptr
-    // 
-    //###this->output_rgb_ptr = this->input_cv_ptr;
     auto frame = this->toCvImage(input);
-    t_color_map.start();
     auto rgb_frame = this->toRGBMap(frame);
-    t_color_map.stop();
     this->output_rgb_ptr =  cv_bridge::CvImage(std_msgs::Header(), "rgb8", rgb_frame).toImageMsg();
 
 }
 
-// publish the outputs
+
+/**
+ * Class member function
+ * 
+ * @class SegNode
+ * 
+ * @brief Function that publishs output messages.
+ * 
+ * @param[in] event Structure passed as a parameter to the callback invoked by a ros::Timer
+ */
 void SegNode::publishMessage(const ros::TimerEvent& event){
     // publish rgb image and output images
     if(this->loaded){
-    t_publishing.start();
+    //t_publishing.start();
     if(this->output_rgb_ptr !=nullptr)
     {
         this->rgb_pub.publish(this->output_rgb_ptr);
@@ -189,29 +266,22 @@ void SegNode::publishMessage(const ros::TimerEvent& event){
         this->pub.publish(*(this->seg_output_ptr));
     }
     //std::cout<<"HIHIHIIH"<<std::endl;
-    t_publishing.stop();
+    //t_publishing.stop();
     }
 }
 
 
-// direct conversion
-/*
-void SegNode::cameraCallback(const sensor_msgs::ImageConstPtr& image_msg)
-{
-    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).requires_grad(false);
-    auto img_tensor = torch::from_blob(const_cast<uchar*>(&(image_msg->data[0])),{image_msg->height, image_msg->width, 3},{(image_msg->height)*(image_msg->width)*3,(image_msg->width)*3, 3},options).permute({2,0,1}).unsqueeze(0);
-    std::cout<<"tensor shape: "<<img_tensor.sizes()<<std::endl;
-    std::cout<<"width: "<<image_msg->width<<" height: "<<image_msg->height<<" step: "<<image_msg->step<<std::endl;
-    std::cout<<"image encoding: "<<image_msg->encoding<<" bigendian: "<<image_msg->is_bigendian<<std::endl;
-    /*
-    auto img_tens_sl = img_tensor.index({"...", "...", Slice(None, 224), Slice(None, 224)});
-    std::vector<torch::jit::IValue> jit_inputs;
-    jit_inputs.push_back(img_tens_sl);
-    at::Tensor output = this->model.forward(jit_inputs).toTensor();
-    */
-    //std::cout<<"okok\n";
-//}
-
+/**
+ * Class member function
+ * 
+ * @class SegNode
+ * 
+ * @brief Function that converts a tensor to cv-image.
+ * 
+ * @details Function that converts a singe channel tensor image to a single channel cv-image.
+ * 
+ * @param[in] event Structure passed as a parameter to the callback invoked by a ros::Timer
+ */
 cv::Mat SegNode::toCvImage(at::Tensor& tensor){
         tensor = tensor.squeeze();
         tensor = tensor.contiguous();
@@ -222,6 +292,18 @@ cv::Mat SegNode::toCvImage(at::Tensor& tensor){
         return mat.clone(); 
 }
 
+
+/**
+ * Class member function
+ * 
+ * @class SegNode
+ * 
+ * @brief Function that converts a 1-channel cv-image to 3-channels cv-image.
+ * 
+ * @details Function that converts a singe channel cv image to a three channels cv-image using a color map. 
+ * 
+ * @param[in] event Structure passed as a parameter to the callback invoked by a ros::Timer
+ */
 cv::Mat SegNode::toRGBMap(cv::Mat& cv_image) {
     // cv_image has one channel
     cv::Mat r,g,b, output;
@@ -235,27 +317,16 @@ cv::Mat SegNode::toRGBMap(cv::Mat& cv_image) {
         b.setTo(this->colors[i][2], mask);     // bllue
     }
     cv::merge(std::vector<cv::Mat>{r,g,b}, output);
-    //std::cout<<"HIHIHIHIHIHIHIHIHIH"<<std::endl;
-    //std::cout<<"cols"<<output.cols<<"rows"<<output.rows<<" "<<output.channels()<<std::endl;
     return output;
     
 }
 
 
-
+// main function
 int main(int argc, char **argv)
 {
-    ros::init(argc, argv, "exmp_node", ros::init_options::AnonymousName);
-    //try{
+    ros::init(argc, argv, "segmentation node", ros::init_options::AnonymousName);
     SegNode nd_ex;
-    //}
-    /*
-    catch (const c10::Error& e) {
-    std::cerr << "error loading the model\n";
-    return -1;
-    }
-    */
-   //torch::
     ros::spin();
     return EXIT_SUCCESS;
 
